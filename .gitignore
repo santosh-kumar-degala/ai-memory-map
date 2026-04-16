@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# local database
+memory_map.sqlite
+memory_map.sqlite-wal
+memory_map.sqlite-shm
+
+# editor
+.vscode/
+.idea/
+

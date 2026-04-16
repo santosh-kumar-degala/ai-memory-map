@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Memory Map</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+      .wrap { display: grid; grid-template-columns: 420px 1fr; height: 100vh; }
+      .left { padding: 16px; border-right: 1px solid rgba(127,127,127,.35); overflow: auto; }
+      .right { position: relative; }
+      #graph { position: absolute; inset: 0; }
+      h1 { margin: 0 0 12px; font-size: 18px; }
+      .row { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+      input[type="text"] { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent; }
+      button { padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent; cursor: pointer; }
+      button:hover { background: rgba(127,127,127,.12); }
+      .muted { opacity: .75; font-size: 12px; line-height: 1.4; }
+      .card { border: 1px solid rgba(127,127,127,.35); border-radius: 12px; padding: 12px; margin-top: 12px; }
+      .result { border-top: 1px solid rgba(127,127,127,.25); padding-top: 10px; margin-top: 10px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New"; font-size: 12px; }
+      .pill { display: inline-block; padding: 2px 8px; border: 1px solid rgba(127,127,127,.35); border-radius: 999px; font-size: 12px; opacity: .85; }
+      .warn { color: #b45309; }
+    </style>
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="left">
+        <h1>AI Memory Map</h1>
+        <div class="muted">
+          Local-first semantic search + knowledge graph for your notes.
+          Put Markdown in <span class="mono">notes/</span>, then reindex.
+        </div>
+
+        <div class="row">
+          <button id="reindexBtn">Reindex</button>
+          <span id="status" class="muted"></span>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <input id="q" type="text" placeholder="Ask: what did we decide about X?" />
+            <button id="searchBtn">Search</button>
+          </div>
+          <div class="muted">
+            Uses Ollama embeddings (default: <span class="mono">nomic-embed-text</span>).
+            If this errors, run <span class="mono">ollama pull nomic-embed-text</span>.
+          </div>
+          <div id="results"></div>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <span class="pill">Graph</span>
+            <span class="muted">Entities are simple heuristics (tags + capitalized phrases).</span>
+          </div>
+          <div class="muted">
+            Tip: add tags like <span class="mono">#project-x</span> or <span class="mono">@alice</span> in notes for cleaner nodes.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="muted">
+            If you want this to be fully offline (no CDN), we can vendor the graph library next.
+          </div>
+        </div>
+      </div>
+
+      <div class="right">
+        <div id="graph"></div>
+      </div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const resultsEl = document.getElementById('results');
+      const qEl = document.getElementById('q');
+
+      function setStatus(msg, kind) {
+        statusEl.textContent = msg || '';
+        statusEl.className = 'muted' + (kind === 'warn' ? ' warn' : '');
+      }
+
+      async function postJSON(url) {
+        const r = await fetch(url, { method: 'POST' });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || r.statusText);
+        return data;
+      }
+
+      async function getJSON(url) {
+        const r = await fetch(url);
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || r.statusText);
+        return data;
+      }
+
+      let network = null;
+      async function refreshGraph() {
+        const g = await getJSON('/api/graph?limit_nodes=200&min_edge_weight=1');
+        const container = document.getElementById('graph');
+        const data = { nodes: new vis.DataSet(g.nodes), edges: new vis.DataSet(g.edges) };
+        const options = {
+          nodes: { shape: 'dot', scaling: { min: 6, max: 28 }, font: { size: 14 } },
+          edges: { smooth: true, scaling: { min: 1, max: 6 } },
+          physics: { stabilization: true },
+          interaction: { hover: true, tooltipDelay: 150 },
+        };
+
+        if (!network) {
+          network = new vis.Network(container, data, options);
+        } else {
+          network.setData(data);
+        }
+      }
+
+      function renderResults(items) {
+        resultsEl.innerHTML = '';
+        if (!items.length) {
+          resultsEl.innerHTML = '<div class="muted" style="margin-top:10px;">No results yet.</div>';
+          return;
+        }
+        for (const it of items) {
+          const div = document.createElement('div');
+          div.className = 'result';
+          const score = (it.score ?? 0).toFixed(3);
+          div.innerHTML = `
+            <div class="muted"><span class="pill">score ${score}</span> <span class="mono">${it.doc_path}</span> (chunk ${it.chunk_index})</div>
+            <div style="margin-top:6px; white-space:pre-wrap;">${escapeHtml(it.content.slice(0, 650))}${it.content.length > 650 ? '…' : ''}</div>
+          `;
+          resultsEl.appendChild(div);
+        }
+      }
+
+      function escapeHtml(s) {
+        return (s || '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+      }
+
+      async function doReindex() {
+        setStatus('Reindexing…');
+        resultsEl.innerHTML = '';
+        try {
+          const out = await postJSON('/api/reindex');
+          setStatus(`Indexed ${out.indexed_docs} doc(s), ${out.indexed_chunks} chunk(s). Skipped ${out.skipped_docs}.`);
+          await refreshGraph();
+        } catch (e) {
+          setStatus(e.message || String(e), 'warn');
+        }
+      }
+
+      async function doSearch() {
+        const q = qEl.value.trim();
+        if (!q) return;
+        setStatus('Searching…');
+        try {
+          const out = await getJSON(`/api/search?q=${encodeURIComponent(q)}&k=8`);
+          renderResults(out.results || []);
+          setStatus(`Done (model: ${out.embed_model}).`);
+        } catch (e) {
+          setStatus(e.message || String(e), 'warn');
+        }
+      }
+
+      document.getElementById('reindexBtn').addEventListener('click', doReindex);
+      document.getElementById('searchBtn').addEventListener('click', doSearch);
+      qEl.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') doSearch();
+      });
+
+      (async function init() {
+        try {
+          await refreshGraph();
+          setStatus('Ready.');
+        } catch (e) {
+          setStatus('Ready (graph empty until you reindex).');
+        }
+      })();
+    </script>
+  </body>
+</html>
+
